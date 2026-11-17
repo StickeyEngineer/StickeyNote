@@ -15,6 +15,20 @@ struct BoardView: View {
     @State private var scanner = false
     @State private var sidebarVisible = false
     @State private var widgetRefresh: Task<Void, Never>?
+    @State private var selection = BoardSelection()
+    @State private var selecting = false
+    @State private var cardFrames: [UUID: CGRect] = [:]
+    @State private var visibleCardFrames: [UUID: CGRect] = [:]
+    @State private var groupFrames: [UUID: CGRect] = [:]
+    @State private var groupViewport = CGRect.zero
+    @State private var groupDragIDs: [UUID]?
+    @State private var groupDragLocation: CGPoint?
+    @State private var groupDragCancelled = false
+    @State private var securityAction: BulkNoteSecurityAction?
+    @State private var securityNoteIDs: [UUID] = []
+    @State private var selectionDragCancelled = false
+    @GestureState private var draggingSelection = false
+    @GestureState private var draggingGroupNotes = false
     @FocusState private var searchFocused: Bool
     @ObservedObject private var sync = CloudKitSyncService.shared
     @Environment(\.horizontalSizeClass) private var sizeClass
@@ -22,6 +36,7 @@ struct BoardView: View {
     @Environment(\.openWindow) private var openWindow
     #endif
     private var active: [StickyNote] { store.notes.filter { $0.deletedAt == nil } }
+    private var selectedNotes: [StickyNote] { filtered.filter { selection.selectedIDs.contains($0.id) } }
     private var groupID: UUID? { section.hasPrefix("group:") ? UUID(uuidString: String(section.dropFirst(6))) : nil }
     private var title: String {
         switch section {
@@ -55,31 +70,43 @@ struct BoardView: View {
                 VStack(spacing: 0) {
                     header(wide: wide)
                     boardToolbar
+                    selectionToolbar
                     if filtered.isEmpty {
                         EmptyState(symbol: search.isEmpty ? "note.text" : "magnifyingglass", title: search.isEmpty ? "A little room to think." : "No notes found", message: search.isEmpty ? "Capture an idea, make a list, or leave yourself a little reminder." : "Try another word or look in a different group.")
                         if search.isEmpty && section != "trash" { Button("Create a note") { create(.text) }.buttonStyle(PillButtonStyle(filled: true)).padding(.bottom, 60) }
                     } else {
-                        ScrollView {
-                            LazyVGrid(columns: listLayout ? [GridItem(.flexible())] : [GridItem(.adaptive(minimum: wide ? 245 : 280), spacing: 20)], alignment: .leading, spacing: 20) {
-                                ForEach(filtered) { note in
-                                    NoteCard(note: note, locked: store.isLocked(note.id), group: store.groups.first { $0.id == note.groupID }?.name, compact: listLayout, onOpen: { store.selectedNoteID = note.id }, onCheck: { itemID in
-                                        store.updateNote(note.id) { n in if let i = n.content.items.firstIndex(where: { $0.id == itemID }) { n.content.items[i].isCompleted.toggle() } }
-                                    })
-                                    .contextMenu { noteMenu(note) }
-                                    .draggable(note.id.uuidString)
-                                }
-                            }.padding(wide ? 30 : 20).padding(.top, 2)
-                        }.scrollIndicators(.hidden)
+                        notesGrid(wide: wide)
                     }
                     footer
                 }.background(Palette.paper)
-            }.foregroundStyle(Palette.ink)
+            }
+            .foregroundStyle(Palette.ink)
+            .coordinateSpace(name: "noteBoardRoot")
+            .onPreferenceChange(NoteGroupFramesKey.self) { groupFrames = $0 }
+            .onPreferenceChange(NoteGroupViewportKey.self) { groupViewport = $0 }
+            .overlay(alignment: .topLeading) {
+                if let ids = groupDragIDs, let location = groupDragLocation {
+                    Label("\(ids.count) \(ids.count == 1 ? "note" : "notes")", systemImage: "doc.on.doc")
+                        .font(.system(size: 12, weight: .semibold))
+                        .padding(.horizontal, 12).padding(.vertical, 8)
+                        .background(Palette.accent, in: RoundedRectangle(cornerRadius: 8))
+                        .foregroundStyle(Palette.accentInk)
+                        .shadow(color: .black.opacity(0.12), radius: 6, y: 2)
+                        .offset(x: location.x + 14, y: location.y + 14)
+                        .allowsHitTesting(false).accessibilityHidden(true)
+                }
+            }
         }
         .sheet(isPresented: $sidebarVisible) { sidebar.frame(minWidth: 280).presentationDetents([.medium, .large]) }
         .sheet(isPresented: Binding(get: { store.selectedNoteID != nil }, set: { if !$0 { store.selectedNoteID = nil } })) {
             if let id = store.selectedNoteID { NoteDetailView(store: store, noteID: id) }
         }
         .sheet(isPresented: $settings) { SettingsView(store: store, sync: sync) }
+        .sheet(item: $securityAction) { action in
+            BulkNoteSecurityView(store: store, noteIDs: securityNoteIDs, action: action) {
+                finishSelection()
+            }
+        }
         .sheet(isPresented: $scanner) { ScanCodeView { value in
             let id = store.createNote(groupID: groupID)
             store.updateNote(id) { $0.content.title = "Scanned code"; $0.content.text = value }
@@ -124,6 +151,307 @@ struct BoardView: View {
             }
         }
         .background { Button("Find notes") { searchFocused = true }.keyboardShortcut("f").hidden().accessibilityHidden(true) }
+        .onChange(of: section) { _, _ in finishSelection() }
+        .onChange(of: search) { _, _ in finishSelection() }
+        .onChange(of: kindFilter) { _, _ in finishSelection() }
+        .onChange(of: listLayout) { _, _ in cancelSelectionDrag(); cardFrames = [:] }
+        .onChange(of: Set(filtered.map(\.id))) { _, ids in
+            cancelSelectionDrag()
+            cancelGroupDrag()
+            selection.retainOnly(ids)
+        }
+        .onChange(of: draggingSelection) { _, dragging in
+            if !dragging { selection.end(); selectionDragCancelled = false; cardFrames = visibleCardFrames }
+        }
+        .onChange(of: draggingGroupNotes) { _, dragging in
+            if !dragging {
+                groupDragIDs = nil
+                groupDragLocation = nil
+                groupDragCancelled = false
+            }
+        }
+        #if os(macOS)
+        .onExitCommand { finishSelection() }
+        .background {
+            if selecting && !searchFocused && store.selectedNoteID == nil && securityAction == nil {
+                Button("Select all notes") { selection.selectAll(filtered.map(\.id)) }
+                    .keyboardShortcut("a").hidden().accessibilityHidden(true)
+            }
+        }
+        #endif
+    }
+
+    private func notesGrid(wide: Bool) -> some View {
+        GeometryReader { viewport in
+            ScrollView {
+                LazyVGrid(columns: listLayout ? [GridItem(.flexible())] : [GridItem(.adaptive(minimum: wide ? 245 : 280), spacing: 20)], alignment: .leading, spacing: 20) {
+                    ForEach(filtered) { note in
+                        selectableCard(note)
+                            .background {
+                                GeometryReader { proxy in
+                                    Color.clear.preference(key: NoteCardFramesKey.self, value: [note.id: proxy.frame(in: .named("noteBoard"))])
+                                }
+                            }
+                    }
+                }
+                .padding(wide ? 30 : 20).padding(.top, 2)
+                .frame(minHeight: viewport.size.height, alignment: .top)
+                .contentShape(Rectangle())
+                .coordinateSpace(name: "noteBoard")
+                .overlay(alignment: .topLeading) {
+                    if let rectangle = selection.marquee {
+                        RoundedRectangle(cornerRadius: 3)
+                            .fill(Palette.accent.opacity(0.2))
+                            .overlay(RoundedRectangle(cornerRadius: 3).stroke(Color(hex: "81934F"), lineWidth: 1))
+                            .frame(width: rectangle.width, height: rectangle.height)
+                            .offset(x: rectangle.minX, y: rectangle.minY)
+                            .allowsHitTesting(false)
+                            .accessibilityHidden(true)
+                    }
+                }
+                #if os(macOS)
+                // Claim a drag before card buttons/links can activate. A plain click
+                // still opens a note; holding and dragging anywhere selects a region.
+                .highPriorityGesture(
+                    DragGesture(minimumDistance: 8, coordinateSpace: .named("noteBoard"))
+                        .updating($draggingSelection) { _, state, _ in state = true }
+                        .onChanged { value in
+                            guard !selectionDragCancelled else { return }
+                            if selection.marquee == nil {
+                                searchFocused = false
+                                selecting = true
+                                let additive = !NSEvent.modifierFlags.intersection([.command, .shift]).isEmpty
+                                selection.begin(at: value.startLocation, additive: additive)
+                            }
+                            selection.update(to: value.location, frames: cardFrames)
+                        }
+                        .onEnded { _ in selection.end(); selectionDragCancelled = false }
+                )
+                #endif
+                .onPreferenceChange(NoteCardFramesKey.self) { frames in
+                    visibleCardFrames = frames
+                    if selection.marquee != nil {
+                        // Lazy grids discard offscreen cells while scrolling. Their
+                        // content-space frames stay valid for the current marquee.
+                        cardFrames.merge(frames, uniquingKeysWith: { _, new in new })
+                    } else { cardFrames = frames }
+                }
+            }
+            .scrollIndicators(.hidden)
+        }
+    }
+
+    private func selectableCard(_ note: StickyNote) -> some View {
+        let selected = selection.selectedIDs.contains(note.id)
+        return NoteCard(note: note, locked: store.isLocked(note.id), group: store.groups.first { $0.id == note.groupID }?.name, compact: listLayout, onOpen: {
+            guard !draggingSelection else { return }
+            #if os(macOS)
+            if !NSEvent.modifierFlags.intersection([.command, .shift]).isEmpty {
+                selecting = true
+                selection.toggle(note.id)
+                return
+            }
+            #endif
+            if selecting { selection.toggle(note.id) }
+            else { store.selectedNoteID = note.id }
+        }, onCheck: { itemID in
+            guard !selecting && !draggingSelection else { return }
+            #if os(macOS)
+            if !NSEvent.modifierFlags.intersection([.command, .shift]).isEmpty {
+                selecting = true
+                selection.toggle(note.id)
+                return
+            }
+            #endif
+            store.updateNote(note.id) { n in
+                if let i = n.content.items.firstIndex(where: { $0.id == itemID }) { n.content.items[i].isCompleted.toggle() }
+            }
+        })
+        .environment(\.openURL, OpenURLAction { _ in
+            #if os(macOS)
+            if !NSEvent.modifierFlags.intersection([.command, .shift]).isEmpty {
+                selecting = true
+                selection.toggle(note.id)
+                return .handled
+            }
+            #endif
+            return selecting || draggingSelection ? .handled : .systemAction
+        })
+        .allowsHitTesting(!selecting)
+        .accessibilityHidden(selecting)
+        .overlay {
+            if selecting {
+                Button {
+                    guard !draggingSelection else { return }
+                    selection.toggle(note.id)
+                } label: {
+                    RoundedRectangle(cornerRadius: 15).fill(.clear)
+                        .contentShape(RoundedRectangle(cornerRadius: 15))
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(store.isLocked(note.id) ? "Locked note" : note.displayTitle)
+                .accessibilityValue(selected ? "Selected" : "Not selected")
+                .accessibilityHint("Toggle selection for bulk actions")
+            }
+        }
+        .overlay {
+            if selected {
+                RoundedRectangle(cornerRadius: 15).strokeBorder(Color(hex: "81934F"), lineWidth: 3)
+                    .allowsHitTesting(false)
+            }
+        }
+        .overlay(alignment: .topTrailing) {
+            if selecting {
+                Image(systemName: selected ? "checkmark.circle.fill" : "circle")
+                    .font(.system(size: 21, weight: .semibold))
+                    .foregroundStyle(selected ? Palette.accentInk : Palette.noteInk.opacity(0.55))
+                    .background(selected ? Palette.accent : Color.white.opacity(0.8), in: Circle())
+                    .padding(16).allowsHitTesting(false).accessibilityHidden(true)
+            }
+        }
+        .contextMenu {
+            if selecting && selected { bulkActions }
+            else {
+                Button("Select note", systemImage: "checkmark.circle") { selecting = true; selection.toggle(note.id) }
+                noteMenu(note)
+            }
+        }
+        #if !os(macOS)
+        .draggable(note.id.uuidString)
+        #endif
+    }
+
+    private var selectionToolbar: some View {
+        HStack(spacing: 12) {
+            if selecting {
+                selectionSummary
+                Button("Select all") { selection.selectAll(filtered.map(\.id)) }
+                    .disabled(filtered.isEmpty)
+                Spacer(minLength: 0)
+                Menu { bulkActions } label: { Label("Actions", systemImage: "ellipsis.circle") }
+                    .menuStyle(.borderlessButton).fixedSize().disabled(selection.selectedIDs.isEmpty)
+                Button("Done") { finishSelection() }
+                    .fontWeight(.semibold).keyboardShortcut(.cancelAction)
+            } else {
+                Button { selecting = true; searchFocused = false } label: {
+                    Label("Select", systemImage: "checkmark.circle")
+                }.disabled(filtered.isEmpty)
+                #if os(macOS)
+                Text("Click and drag across notes to select").foregroundStyle(Palette.secondary).lineLimit(1)
+                #endif
+                Spacer(minLength: 0)
+            }
+        }
+        .buttonStyle(.plain).font(.system(size: 12))
+        .frame(height: 30).padding(.horizontal, 30).padding(.bottom, 8)
+    }
+
+    private var selectionSummary: some View {
+        Label("\(selection.selectedIDs.count) selected", systemImage: "hand.draw")
+            .fontWeight(.medium).foregroundStyle(Palette.ink)
+            #if os(macOS)
+            .contentShape(Rectangle())
+            .gesture(
+                DragGesture(minimumDistance: 8, coordinateSpace: .named("noteBoardRoot"))
+                    .updating($draggingGroupNotes) { _, state, _ in state = true }
+                    .onChanged { value in
+                        guard !groupDragCancelled, selecting, section != "trash" else { return }
+                        if groupDragIDs == nil {
+                            let ids = selectedNotes.map(\.id)
+                            guard !ids.isEmpty else { return }
+                            groupDragIDs = ids
+                        }
+                        groupDragLocation = value.location
+                    }
+                    .onEnded { value in finishGroupDrag(at: value.location) }
+            )
+            .help("Drag selected notes to a group")
+            #endif
+    }
+
+    private func groupDestination(at point: CGPoint) -> UUID? {
+        guard groupViewport.contains(point) else { return nil }
+        return store.groups.first { groupFrames[$0.id]?.contains(point) == true }?.id
+    }
+
+    private func finishGroupDrag(at point: CGPoint) {
+        let ids = groupDragIDs ?? []
+        let destination = groupDestination(at: point)
+        let canMove = !groupDragCancelled && selecting && section != "trash"
+        groupDragIDs = nil
+        groupDragLocation = nil
+        groupDragCancelled = false
+        guard canMove, let destination, !ids.isEmpty else { return }
+        let liveIDs = Set(active.map(\.id))
+        for id in ids where liveIDs.contains(id) {
+            store.updateNote(id) { $0.groupID = destination }
+        }
+        finishSelection()
+    }
+
+    private func cancelGroupDrag() {
+        if draggingGroupNotes { groupDragCancelled = true }
+        groupDragIDs = nil
+        groupDragLocation = nil
+    }
+
+    @ViewBuilder private var bulkActions: some View {
+        if section == "trash" {
+            Button("Restore selected notes", systemImage: "arrow.uturn.backward") {
+                let ids = selectedNotes.map(\.id)
+                for id in ids { store.restoreNote(id) }
+                store.selectedNoteID = nil
+                finishSelection()
+            }
+        } else {
+            #if os(macOS)
+            Button("Keep on desktop", systemImage: "macwindow.on.rectangle") {
+                let ids = selectedNotes.map(\.id)
+                for id in ids { FloatingNoteWindows.shared.pin(id) }
+                finishSelection()
+            }
+            #endif
+            Menu("Move to group", systemImage: "folder") {
+                Button("No group") { moveSelectedNotes(to: nil) }
+                ForEach(store.groups) { group in
+                    Button(group.name) { moveSelectedNotes(to: group.id) }
+                }
+            }
+            Button("Lock selected notes", systemImage: "lock") { beginSecurityAction(.lock) }
+                .disabled(!selectedNotes.contains { !store.isLocked($0.id) })
+            Button("Unlock selected notes", systemImage: "lock.open") { beginSecurityAction(.unlock) }
+                .disabled(!selectedNotes.contains { store.isLocked($0.id) })
+            Divider()
+            Button("Move to Recently Deleted", systemImage: "trash", role: .destructive) {
+                let ids = selectedNotes.map(\.id)
+                for id in ids { store.deleteNote(id) }
+                finishSelection()
+            }
+        }
+    }
+
+    private func moveSelectedNotes(to groupID: UUID?) {
+        let ids = selectedNotes.map(\.id)
+        for id in ids { store.updateNote(id) { $0.groupID = groupID } }
+        finishSelection()
+    }
+
+    private func beginSecurityAction(_ action: BulkNoteSecurityAction) {
+        securityNoteIDs = selectedNotes.filter { action == .lock ? !store.isLocked($0.id) : store.isLocked($0.id) }.map(\.id)
+        guard !securityNoteIDs.isEmpty else { return }
+        securityAction = action
+    }
+
+    private func finishSelection() {
+        cancelSelectionDrag()
+        cancelGroupDrag()
+        selection.clear()
+        selecting = false
+    }
+
+    private func cancelSelectionDrag() {
+        if draggingSelection { selectionDragCancelled = true }
+        selection.end()
     }
     private var sidebar: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -142,9 +470,26 @@ struct BoardView: View {
                 VStack(spacing: 3) {
                     ForEach(Array(store.groups.enumerated()), id: \.element.id) { index, group in
                         navRow(group.name, symbol: group.symbol, key: "group:" + group.id.uuidString, count: active.filter { $0.groupID == group.id }.count, tint: [Color(hex: "A5B377"),Color(hex: "C8A5D1"),Color(hex: "D8AE79"),Color(hex: "8AB6C8")][index % 4])
+                        .background {
+                            GeometryReader { proxy in
+                                Color.clear.preference(key: NoteGroupFramesKey.self, value: [group.id: proxy.frame(in: .named("noteBoardRoot"))])
+                            }
+                        }
+                        .overlay {
+                            if let location = groupDragLocation, groupDestination(at: location) == group.id {
+                                RoundedRectangle(cornerRadius: 8)
+                                    .fill(Palette.accent.opacity(0.25))
+                                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color(hex: "81934F"), lineWidth: 2))
+                                    .padding(.horizontal, 12)
+                                    .allowsHitTesting(false).accessibilityHidden(true)
+                            }
+                        }
                         .dropDestination(for: String.self) { values, _ in
-                            for value in values { if let id = UUID(uuidString: value) { store.updateNote(id) { $0.groupID = group.id } } }
-                            return true
+                            let ids = Set(values.flatMap { $0.split(separator: "\n") }.compactMap { UUID(uuidString: String($0)) })
+                                .intersection(active.map(\.id))
+                            for id in ids { store.updateNote(id) { $0.groupID = group.id } }
+                            if !ids.isEmpty { finishSelection() }
+                            return !ids.isEmpty
                         }
                         .contextMenu {
                             Button("Rename group") { renaming = group.id; groupName = group.name; showGroups = true }
@@ -152,7 +497,13 @@ struct BoardView: View {
                         }
                     }
                 }
-            }.scrollIndicators(.hidden)
+            }
+            .scrollIndicators(.hidden)
+            .background {
+                GeometryReader { proxy in
+                    Color.clear.preference(key: NoteGroupViewportKey.self, value: proxy.frame(in: .named("noteBoardRoot")))
+                }
+            }
             Spacer(minLength: 20)
             VStack(alignment: .leading, spacing: 8) {
                 Image(systemName: "sparkles").font(.system(size: 21, weight: .light)).foregroundStyle(Color(hex: "929C76"))
@@ -247,6 +598,27 @@ struct BoardView: View {
             Divider()
             Button("Move to Recently Deleted", systemImage: "trash", role: .destructive) { store.deleteNote(note.id) }
         }
+    }
+}
+
+private struct NoteCardFramesKey: PreferenceKey {
+    static let defaultValue: [UUID: CGRect] = [:]
+    static func reduce(value: inout [UUID: CGRect], nextValue: () -> [UUID: CGRect]) {
+        value.merge(nextValue(), uniquingKeysWith: { _, new in new })
+    }
+}
+
+private struct NoteGroupFramesKey: PreferenceKey {
+    static let defaultValue: [UUID: CGRect] = [:]
+    static func reduce(value: inout [UUID: CGRect], nextValue: () -> [UUID: CGRect]) {
+        value.merge(nextValue(), uniquingKeysWith: { _, new in new })
+    }
+}
+
+private struct NoteGroupViewportKey: PreferenceKey {
+    static let defaultValue = CGRect.zero
+    static func reduce(value: inout CGRect, nextValue: () -> CGRect) {
+        value = nextValue()
     }
 }
 

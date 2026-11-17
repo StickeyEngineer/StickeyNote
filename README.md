@@ -9,6 +9,7 @@ The native apps use SwiftUI, AppKit, and UIKit. The offline-capable web app uses
 ## Features
 
 - Notes and checklists with autosave, search, groups, pins, and grid/list layouts.
+- Bulk selection in the native notes board: click, hold, and drag across cards on Mac, or choose **Select** and tap individual notes. Use **Actions** to move, lock/unlock, delete, or keep selected notes on the Mac desktop.
 - Rich text formatting, font choices, text sizing, and 25 note colors.
 - Light, Dark, and Auto themes in Settings. Auto follows your device’s appearance; preferences are saved locally and notes keep their chosen colors.
 - Drawing over note text with adjustable pens, an eraser, undo/redo, and PNG export.
@@ -20,6 +21,8 @@ The native apps use SwiftUI, AppKit, and UIKit. The offline-capable web app uses
 - Optional private iCloud sync with offline merging and interrupted-upload recovery.
 
 Browsers do not support native Apple widgets or the native Apple authentication dialog. Browser-created PIN/password locks work across clients. Apple-authenticated locks use a device-only Keychain credential and can be unlocked on the Apple device that created them; other clients preserve their ciphertext. Storage capacity depends on the device or browser; the app imposes no artificial note-count limit.
+
+On Mac, Command/Shift-drag adds to the current selection; Command/Shift-click toggles a note. In Select mode, **Select all** (⌘A) selects the current search/filter results, and **Done** or Escape clears selection. Drag the selection count onto a sidebar group to move the batch. Bulk unlocking uses Apple’s system authentication prompt and keeps each note’s encryption and auto-lock timer. Older PIN/password locks are skipped until converted to Apple authentication in their note settings; the bulk dialog never asks for a typed PIN or password.
 
 ## Requirements
 
