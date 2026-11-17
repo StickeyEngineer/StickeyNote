@@ -3,11 +3,11 @@ set -euo pipefail
 cd "${0:A:h:h}"
 
 if (( $# < 1 || $# > 2 )); then
-    print -u2 "Usage: $0 <archive|submit|package> [version, default 1.0.0]"
+    print -u2 "Usage: $0 <archive|submit|package> [version, default 1.0.1]"
     exit 2
 fi
 STICKEY_RELEASE_STAGE="$1"
-STICKEY_RELEASE_VERSION="${2:-1.0.0}"
+STICKEY_RELEASE_VERSION="${2:-1.0.1}"
 if [[ ! "$STICKEY_RELEASE_VERSION" =~ '^[0-9]+\.[0-9]+\.[0-9]+$' ]]; then
     print -u2 "Version must have the form 1.0.0."
     exit 2
