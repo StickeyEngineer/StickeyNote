@@ -15,6 +15,7 @@ struct DesktopNoteView: View {
     @State private var appActive = NSApp.isActive
     @State private var error: String?
     @State private var showLock = false
+    @State private var showGroups = false
     @State private var unlockAttempt = UUID()
     @State private var focusedChecklistItem: UUID?
     private var note: StickyNote? { store.notes.first { $0.id == noteID } }
@@ -69,6 +70,7 @@ struct DesktopNoteView: View {
             .onChange(of: store.isLocked(noteID)) { _, locked in if locked { cancelUnlock() } }
             .onReceive(NotificationCenter.default.publisher(for: NSApplication.didResignActiveNotification)) { _ in
                 appActive = false
+                showGroups = false
                 if !AppleNoteSecurity.isPresentingSystemPrompt { cancelAppleOperation(); cancelUnlock(); showLock = false }
             }
             .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in appActive = true }
@@ -85,8 +87,28 @@ struct DesktopNoteView: View {
     private func header(_ note: StickyNote) -> some View {
         HStack(spacing: 6) {
             Button { desktop.unpin(noteID) } label: { Image(systemName: "xmark").font(.system(size: 10, weight: .medium)).frame(width: 18, height: 22) }.buttonStyle(.plain).foregroundStyle(Palette.noteInk.opacity(0.45)).help("Remove from desktop; keep the note").accessibilityLabel("Remove from desktop")
-            Text("ON YOUR DESKTOP").font(.system(size: 8, weight: .semibold)).tracking(1).foregroundStyle(Palette.noteInk.opacity(0.4))
-            Spacer()
+            let group = store.groups.first { $0.id == note.groupID }
+            Button { showGroups.toggle() } label: {
+                HStack(spacing: 4) {
+                    Image(systemName: group?.symbol ?? "folder")
+                    Text(group?.name ?? "No group").lineLimit(1)
+                    Image(systemName: "chevron.down").font(.system(size: 8, weight: .semibold))
+                }
+                .font(.system(size: 11, weight: .medium))
+                .padding(.horizontal, 6).frame(height: 22)
+                .background(Palette.noteInk.opacity(0.06), in: Capsule())
+            }
+            .buttonStyle(.plain)
+            .help("Browse note groups")
+            .accessibilityLabel("Browse note groups, \(group?.name ?? "No group")")
+            .accessibilityIdentifier("desktop.groupBrowser")
+            .popover(isPresented: $showGroups, arrowEdge: .bottom) {
+                DesktopGroupBrowser(store: store, initialGroupID: group?.id) { id in
+                    showGroups = false
+                    desktop.openFromGroup(id)
+                }
+            }
+            Spacer(minLength: 0)
             if !store.isLocked(noteID) {
                 Button {
                     if note.isPasswordProtected { store.relockNote(noteID) } else { runAppleOperation(protect: true) }

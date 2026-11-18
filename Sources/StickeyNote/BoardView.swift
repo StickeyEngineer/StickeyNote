@@ -99,7 +99,7 @@ struct BoardView: View {
         }
         .sheet(isPresented: $sidebarVisible) { sidebar.frame(minWidth: 280).presentationDetents([.medium, .large]) }
         .sheet(isPresented: Binding(get: { store.selectedNoteID != nil }, set: { if !$0 { store.selectedNoteID = nil } })) {
-            if let id = store.selectedNoteID { NoteDetailView(store: store, noteID: id) }
+            if let id = store.selectedNoteID { NoteDetailView(store: store, noteID: id).id(id) }
         }
         .sheet(isPresented: $settings) { SettingsView(store: store, sync: sync) }
         .sheet(item: $securityAction) { action in

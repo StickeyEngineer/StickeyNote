@@ -150,6 +150,12 @@ final class FloatingNoteWindows: NSObject, ObservableObject, NSWindowDelegate {
         showPanel(id, focus: true)
     }
 
+    func openFromGroup(_ id: UUID) {
+        guard liveNote(id) != nil else { return }
+        if isPinned(id) { bringForward(id) }
+        else { openMainNote?(id) }
+    }
+
     func setAlwaysOnTop(_ enabled: Bool, for id: UUID) {
         guard isPinned(id) else { return }
         topmost[id] = enabled
