@@ -151,9 +151,9 @@ struct DesktopNoteView: View {
     private func compactChecklist(_ note: StickyNote) -> some View {
         ScrollViewReader { proxy in
             ScrollView {
-                VStack(alignment: .leading, spacing: 9) {
+                VStack(alignment: .leading, spacing: 0) {
                     ForEach(note.content.items) { item in
-                        HStack(alignment: .top, spacing: 8) {
+                        ReorderableChecklistRow(noteID: noteID, item: item, items: content(\.items, fallback: []), compact: true) {
                             Button { store.updateNote(noteID) { n in if let i = n.content.items.firstIndex(where: { $0.id == item.id }) { n.content.items[i].isCompleted.toggle() } } } label: {
                                 Image(systemName: item.isCompleted ? "checkmark.square.fill" : "square").font(.system(size: 15)).foregroundStyle(Palette.noteInk.opacity(item.isCompleted ? 0.45 : 0.8))
                             }.buttonStyle(.plain).accessibilityLabel("\(item.isCompleted ? "Uncheck" : "Complete") \(item.text)")

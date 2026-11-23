@@ -33,7 +33,7 @@ struct NoteDetailView: View {
                         VStack(spacing: 0) {
                             titleField(note)
                             if note.kind == .checklist {
-                                ChecklistEditor(items: contentBinding(\.items, fallback: []), fontSize: note.fontSize, font: note.font).padding(.horizontal, 22).padding(.bottom, 20)
+                                ChecklistEditor(noteID: note.id, items: contentBinding(\.items, fallback: []), fontSize: note.fontSize, font: note.font).padding(.horizontal, 22).padding(.bottom, 20)
                             } else if tab == "draw" {
                                 DrawingEditor(strokes: contentBinding(\.strokes, fallback: []), backgroundText: note.content.text, font: note.font, fontSize: note.fontSize).padding(20)
                             } else {

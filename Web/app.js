@@ -3,6 +3,7 @@ import { createCloudSync } from './cloud.js';
 import { linkedTextHTML, safeLinkURL, updateAutomaticLinks, createRichTextHistory, captureTextSelection, restoreTextSelection } from './links.js';
 
 const paths = {
+  grip:'M9 5h.01M15 5h.01M9 12h.01M15 12h.01M9 19h.01M15 19h.01',
   plus:'M12 5v14M5 12h14', note:'M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h9l5-5V5a2 2 0 0 0-2-2h-4Zm1 18v-5h5M8 8h8M8 12h6',
   grid:'M4 4h6v6H4zM14 4h6v6h-6zM4 14h6v6H4zM14 14h6v6h-6z', list:'M8 6h12M8 12h12M8 18h12M4 6h.01M4 12h.01M4 18h.01',
   check:'m5 12 4 4L19 6', checklist:'M9 5h12M9 12h12M9 19h12m-19-14 1 1 2-2m-3 8 1 1 2-2m-3 8 1 1 2-2',
@@ -31,6 +32,7 @@ let filter = 'all', query = '', sort = 'updated', view = 'grid', editorID = null
 let toastTimer, renderFrame, cloudMessage = 'Available with setup', modalCleanup = null, modalNoteID = null, modalSession = null;
 let drawingColor = '30362B', drawingWidth = 3, erasing = false, drawingUndo = [];
 const editor = $('#editor-dialog'), utility = $('#utility-dialog');
+let cancelChecklistDrag;
 const editorTextStates = new Map();
 const textEditorField = target => target?.closest('#note-content,[data-check-input]');
 function clearEditorTextStates() { for (const state of editorTextStates.values()) state.history.clear(); editorTextStates.clear(); }
@@ -136,6 +138,7 @@ function sanitizeHTML(value) {
 }
 function openNote(id) { store.lockExpiredNotes(); editorID = id; drawingVisible = false; drawingUndo = []; renderEditor(); if (!editor.open) editor.showModal(); requestAnimationFrame(() => { if ($('#drawing-preview')) drawStrokes($('#drawing-preview'), currentNote()?.content.strokes || []); }); $('#sidebar').classList.remove('open'); }
 function renderEditor() {
+  cancelChecklistDrag?.();
   const activeItem = document.activeElement?.closest('[data-check-input]');
   const itemSelection = activeItem ? captureTextSelection(activeItem) : null;
   const activeItemID = activeItem?.dataset.checkInput;
@@ -158,8 +161,103 @@ function richToolbar(note) {
   return `<div class="rich-toolbar" role="toolbar" aria-label="Text formatting"><select id="font-select" aria-label="Font">${FONTS.map(font => `<option value="${font.id}" ${note.font===font.id?'selected':''}>${escape(font.name || font.displayName)}</option>`).join('')}</select><select id="font-size" aria-label="Font size">${[12,14,16,18,20,24,28,32,40].map(size=>`<option ${note.fontSize===size?'selected':''}>${size}</option>`).join('')}</select><span class="toolbar-separator"></span>${[['bold','bold'],['italic','italic'],['underline','underline'],['strikeThrough','strike'],['insertUnorderedList','list'],['insertOrderedList','numbered']].map(([command,glyph])=>`<button data-command="${command}" aria-label="${command}" title="${command}">${icon(glyph,15)}</button>`).join('')}<span class="toolbar-separator"></span><button data-command="undo" title="Undo" aria-label="Undo">${icon('undo',15)}</button><button data-command="redo" title="Redo" aria-label="Redo">${icon('redo',15)}</button></div>`;
 }
 function checklistRows(note) {
-  return note.content.items.map((item,index)=>`<div class="checklist-row ${item.isCompleted?'completed':''}" data-item="${item.id}"><button class="check-toggle" data-action="editor-toggle" data-item="${item.id}" aria-label="${item.isCompleted?'Uncheck':'Check'} item">${item.isCompleted?icon('check',14):''}</button><div class="checklist-text" data-check-input="${item.id}" contenteditable="true" role="textbox" aria-multiline="true" aria-label="Checklist item ${index+1}" data-placeholder="Something to do…" spellcheck="true" tabindex="0">${linkedTextHTML(item.text)}</div><div class="row-actions"><button data-action="item-up" data-item="${item.id}" aria-label="Move item up" ${index===0?'disabled':''}>${icon('up',13)}</button><button data-action="item-down" data-item="${item.id}" aria-label="Move item down" ${index===note.content.items.length-1?'disabled':''}>${icon('down',13)}</button><button data-action="item-delete" data-item="${item.id}" aria-label="Remove item">${icon('close',13)}</button></div></div>`).join('');
+  return note.content.items.map((item,index)=>`<div class="checklist-row ${item.isCompleted?'completed':''}" data-item="${item.id}"><span class="checklist-grip" title="Drag to reorder" aria-hidden="true">${icon('grip',16)}</span><button class="check-toggle" data-action="editor-toggle" data-item="${item.id}" aria-label="${item.isCompleted?'Uncheck':'Check'} item">${item.isCompleted?icon('check',14):''}</button><div class="checklist-text" data-check-input="${item.id}" contenteditable="true" role="textbox" aria-multiline="true" aria-label="Checklist item ${index+1}" data-placeholder="Something to do…" spellcheck="true" tabindex="0">${linkedTextHTML(item.text)}</div><div class="row-actions"><button data-action="item-up" data-item="${item.id}" aria-label="Move item up" ${index===0?'disabled':''}>${icon('up',13)}</button><button data-action="item-down" data-item="${item.id}" aria-label="Move item down" ${index===note.content.items.length-1?'disabled':''}>${icon('down',13)}</button><button data-action="item-delete" data-item="${item.id}" aria-label="Remove item">${icon('close',13)}</button></div></div>`).join('');
 }
+function moveChecklistItem(noteID, itemID, targetID, after) {
+  return store.updateNote(noteID, note => {
+    const items = note.content.items;
+    const source = items.findIndex(item => item.id === itemID);
+    const target = items.findIndex(item => item.id === targetID);
+    if (source < 0 || target < 0 || source === target) return;
+    const insertion = target + Number(after) - Number(source < target);
+    const [item] = items.splice(source, 1);
+    items.splice(insertion, 0, item);
+  });
+}
+
+editor.addEventListener('pointerdown', event => {
+  const grip = event.target.closest('.checklist-grip');
+  if (!grip || !event.isPrimary || event.button !== 0) return;
+  const row = grip.closest('.checklist-row'), list = row.parentElement;
+  if (list.children.length < 2 || list.classList.contains('is-reordering')) return;
+  event.preventDefault();
+  const body = list.closest('.editor-body'), noteID = editorID, pointerID = event.pointerId;
+  const listeners = new AbortController();
+  const options = {signal:listeners.signal};
+  let target, after, x = event.clientX, y = event.clientY, frame;
+
+  function showTarget() {
+    target?.removeAttribute('data-drop-edge');
+    target = document.elementFromPoint(x, y)?.closest('.checklist-row');
+    if (target?.parentElement !== list || target === row) { target = null; return; }
+    const bounds = target.getBoundingClientRect();
+    after = y >= bounds.top + bounds.height / 2;
+    target.dataset.dropEdge = after ? 'bottom' : 'top';
+  }
+
+  function scrollNearEdge() {
+    if (!list.isConnected || !editor.open) { finish(); return; }
+    const bounds = body.getBoundingClientRect();
+    if (x < bounds.left || x > bounds.right || y < bounds.top || y > bounds.bottom) return;
+    const speed = y < bounds.top + 40 ? -8 : y > bounds.bottom - 40 ? 8 : 0;
+    if (!speed) return;
+    const previous = body.scrollTop;
+    body.scrollTop += speed;
+    if (body.scrollTop !== previous) {
+      showTarget();
+      frame = requestAnimationFrame(scrollNearEdge);
+    }
+  }
+
+  function finish() {
+    cancelChecklistDrag = null;
+    listeners.abort();
+    cancelAnimationFrame(frame);
+    target?.removeAttribute('data-drop-edge');
+    row.classList.remove('is-dragged');
+    list.classList.remove('is-reordering');
+    if (grip.hasPointerCapture(pointerID)) grip.releasePointerCapture(pointerID);
+  }
+
+  cancelChecklistDrag = finish;
+  list.classList.add('is-reordering');
+  row.classList.add('is-dragged');
+  grip.setPointerCapture(pointerID);
+  document.addEventListener('pointermove', move => {
+    if (move.pointerId !== pointerID) return;
+    x = move.clientX;
+    y = move.clientY;
+    showTarget();
+    cancelAnimationFrame(frame);
+    frame = requestAnimationFrame(scrollNearEdge);
+  }, options);
+  document.addEventListener('pointerup', async drop => {
+    if (drop.pointerId !== pointerID) return;
+    x = drop.clientX;
+    y = drop.clientY;
+    showTarget();
+    finish();
+    if (!target || !list.isConnected || !editor.open) return;
+    try {
+      await moveChecklistItem(noteID, row.dataset.item, target.dataset.item, after);
+      if (list.isConnected && editor.open) {
+        const scrollTop = body.scrollTop;
+        renderEditor();
+        const newBody = $('.editor-body', editor);
+        if (newBody) newBody.scrollTop = scrollTop;
+      }
+    } catch (error) { report(error); }
+  }, options);
+  document.addEventListener('pointercancel', cancel => {
+    if (cancel.pointerId === pointerID) finish();
+  }, options);
+  window.addEventListener('blur', finish, options);
+  grip.addEventListener('lostpointercapture', lost => {
+    if (lost.pointerId === pointerID) finish();
+  }, options);
+  editor.addEventListener('cancel', cancel => { cancel.preventDefault(); finish(); }, options);
+});
+
 async function saveRichText(detectLinks=true) { const field=$('#note-content'); if (!field || !currentNote()) return; const state=editorTextStates.get(field); if (detectLinks && !state?.composing) { updateAutomaticLinks(field); state?.history.commit(); } await store.updateNote(editorID,note=>{note.content.text=field.innerText;note.content.richHTML=sanitizeHTML(field.innerHTML);note.content.richText=null;});const stats=$('#editor-stats');if(stats)stats.textContent=`${currentNote().encryptedContent?'Encrypted · ':''}${currentNote().content.text.trim().split(/\s+/).filter(Boolean).length} words · Saved as you go`; }
 
 async function saveTextField(field,detectLinks=true) {
@@ -340,7 +438,12 @@ document.addEventListener('click',async event=>{
     case 'toggle-check':await store.updateNote(id,n=>{const row=n.content.items.find(row=>row.id===item);if(row)row.isCompleted=!row.isCompleted;});break;
     case 'editor-toggle':await store.updateNote(editorID,n=>{const row=n.content.items.find(row=>row.id===item);if(row)row.isCompleted=!row.isCompleted;});renderEditor();break;
     case 'add-item':{const itemID=crypto.randomUUID().toUpperCase();await store.updateNote(editorID,n=>n.content.items.push({id:itemID,text:'',isCompleted:false}));renderEditor();$(`[data-check-input="${itemID}"]`)?.focus();break;}
-    case 'item-up':case 'item-down':await store.updateNote(editorID,n=>{const index=n.content.items.findIndex(row=>row.id===item),next=index+(action==='item-up'?-1:1);if(next>=0&&next<n.content.items.length)[n.content.items[index],n.content.items[next]]=[n.content.items[next],n.content.items[index]];});renderEditor();break;
+    case 'item-up':case 'item-down':{
+      const items = currentNote().content.items, index = items.findIndex(row => row.id === item);
+      const down = action === 'item-down', neighbor = items[index + (down ? 1 : -1)];
+      if (index >= 0 && neighbor) { await moveChecklistItem(editorID, item, neighbor.id, down); renderEditor(); }
+      break;
+    }
     case 'item-delete':await store.updateNote(editorID,n=>n.content.items=n.content.items.filter(row=>row.id!==item));renderEditor();break;
     case 'password':passwordDialog(id);break;
     case 'unlock':passwordDialog(id,'unlock');break;
@@ -394,7 +497,7 @@ document.addEventListener('dragstart',event=>{const card=event.target.closest('[
 document.addEventListener('dragover',event=>{const group=event.target.closest('[data-group]');if(group){event.preventDefault();group.classList.add('drop-target');}});
 document.addEventListener('dragleave',event=>event.target.closest('[data-group]')?.classList.remove('drop-target'));
 document.addEventListener('drop',async event=>{const group=event.target.closest('[data-group]');if(!group)return;event.preventDefault();group.classList.remove('drop-target');const id=event.dataTransfer.getData('text/x-stickey-note');if(noteByID(id)){await store.updateNote(id,n=>n.groupID=group.dataset.group);toast('Note moved.');}});
-editor.addEventListener('close',()=>{if(editor.open)return;clearEditorTextStates();editor.innerHTML='';editorID=null;drawingVisible=false;drawingUndo=[];store.flush().catch(report);scheduleRender();});
+editor.addEventListener('close',()=>{if(editor.open)return;cancelChecklistDrag?.();clearEditorTextStates();editor.innerHTML='';editorID=null;drawingVisible=false;drawingUndo=[];store.flush().catch(report);scheduleRender();});
 document.addEventListener('visibilitychange',()=>{if(document.hidden){clearUtility();store.relockAll();store.flush().catch(report);if(editor.open)renderEditor();}else store.lockExpiredNotes();});
 window.addEventListener('focus',()=>store.lockExpiredNotes());
 window.addEventListener('pagehide',()=>{clearUtility();store.relockAll();store.flush().catch(report);});

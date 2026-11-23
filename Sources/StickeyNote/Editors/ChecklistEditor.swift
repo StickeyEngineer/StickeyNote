@@ -2,6 +2,7 @@ import SwiftUI
 import StickeyCore
 
 struct ChecklistEditor: View {
+    let noteID: UUID
     @Binding var items: [ChecklistItem]
     var fontSize: Double = 18
     var font: NoteFont = .system
@@ -44,16 +45,14 @@ struct ChecklistEditor: View {
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 0) {
                         ForEach(items) { item in
-                            checklistRow(item)
-                                .id(item.id)
-                                .draggable(item.id.uuidString)
-                                .dropDestination(for: String.self) { values, _ in
-                                    guard let value = values.first, let id = UUID(uuidString: value),
-                                          let from = items.firstIndex(where: { $0.id == id }),
-                                          let to = items.firstIndex(where: { $0.id == item.id }), from != to else { return false }
-                                    items.move(fromOffsets: IndexSet(integer: from), toOffset: to > from ? to + 1 : to)
-                                    return true
-                                }
+                            ReorderableChecklistRow(noteID: noteID, item: item, items: $items) {
+                                checklistRow(item)
+                            }
+                            .overlay(alignment: .bottom) {
+                                Rectangle().fill(Color.black.opacity(0.08)).frame(height: 1).padding(.leading, fontSize + 52)
+                                    .allowsHitTesting(false)
+                            }
+                            .id(item.id)
                         }
                     }
                 }
@@ -114,10 +113,6 @@ struct ChecklistEditor: View {
             .menuStyle(.borderlessButton)
             .fixedSize()
             .accessibilityLabel("Item options")
-        }
-        .padding(.vertical, 11)
-        .overlay(alignment: .bottom) {
-            Rectangle().fill(Color.black.opacity(0.08)).frame(height: 1).padding(.leading, fontSize + 14)
         }
     }
 
